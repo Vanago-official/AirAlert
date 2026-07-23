@@ -8,13 +8,14 @@ except RuntimeError:
 
 import logging
 import string
-from datetime import datetime
+import re
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from pyrogram import Client, filters
 from pyrogram.types import Message
+import aiohttp
 
 import config
 from database import UserManager
@@ -36,7 +37,7 @@ def get_keyboard():
     kb = [
         [KeyboardButton(text="Підписатись"), KeyboardButton(text="Відписатись")],
         [KeyboardButton(text="Розм'ютити"), KeyboardButton(text="Зам'ютити")],
-        [KeyboardButton(text="Інфо")]
+        [KeyboardButton(text="Статус"), KeyboardButton(text="Інфо")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -74,73 +75,125 @@ async def mute_action(message: types.Message):
     else:
         await message.answer("Ви ще не підписані. Натисніть 'Підписатись'.", reply_markup=get_keyboard())
 
+@dp.message(F.text == "Статус")
+async def status_action(message: types.Message):
+    user = user_manager.get_user(message.from_user.id)
+    if not user:
+        await message.answer("Ви не підписані на сповіщення. Натисніть 'Підписатись'.", reply_markup=get_keyboard())
+    elif user.muted:
+        await message.answer("Ваш статус: ЗАМ'ЮЧЕНО\nВи не будете отримувати тривоги до наступного відбою або поки не натиснете 'Розм'ютити'.", reply_markup=get_keyboard())
+    else:
+        await message.answer("Ваш статус: АКТИВНО\nВи отримуєте всі сповіщення про нові загрози.", reply_markup=get_keyboard())
+
 @dp.message(F.text == "Інфо")
 async def info_action(message: types.Message):
     info_text = (
         "ℹ️ <b>Інформація про бота</b>\n\n"
         "Цей бот моніторить канали на наявність повідомлень про швидкісні цілі та балістику.\n\n"
         "• <b>Підписатись</b> — отримувати сповіщення\n"
-        "• <b>Відписатись</b> — повністю перестати отримувати сповіщення\n"
+        "• <b>Відписатись</b> — повністю пета ну рестати отримувати сповіщення\n"
         "• <b>Зам'ютити</b> — тимчасово вимкнути сповіщення (наприклад, якщо ви вже в укритті)\n"
-        "• <b>Розм'ютити</b> — увімкнути сповіщення знову\n\n"
+        "• <b>Розм'ютити</b> — увімкнути сповіщення знову\n"
+        "• <b>Статус</b> — перевірити, чи увімкнені у вас зараз сповіщення\n\n"
         "<i>При надсиланні тривоги бот м'ютить вас автоматично, щоб не спамити. При відбої — розм'ючує.</i>"
     )
     await message.answer(info_text, parse_mode="HTML", reply_markup=get_keyboard())
 
 @app.on_message(filters.chat(config.CHANNELS_TO_MONITOR))
+@app.on_edited_message(filters.chat(config.CHANNELS_TO_MONITOR))
 async def handle_channel_message(client: Client, message: Message):
     text = message.text or message.caption
     if not text:
         return
-    
+        
     chat_title = message.chat.title or "Unknown Chat"
-    # Щоб не спамити повними текстами, виводимо перші 100 символів
     logging.info(f"[Повідомлення з {chat_title}] {text[:100]}...")
     
     clean_text = text.lower()
-    clean_text = clean_text.translate(str.maketrans('', '', string.punctuation))
     
-    ignore_words = getattr(config, 'IGNORE_WORDS', [])
-    if any(iw.lower() in clean_text for iw in ignore_words):
-        return  # Це новина, зведення або повідомлення про наслідки, ігноруємо
+    # 1. ЖОРСТКИЙ ФІЛЬТР: якщо це дрони/КАБи або інше місто - одразу ігноруємо
+    ignore_words = ["бпла", "шахед", "дрон", "мопед", "каб", "каби", "харків", "сумщин", "одес", "дніпр", "запоріж", "полтав", "херсон", "миколаїв", "чернігів"]
+    if any(word in clean_text for word in ignore_words) and "київ" not in clean_text:
+        logging.info("[ФІЛЬТР] Пропущено (БпЛА/КАБ або інше місто)")
+        return
     
-    # Видаляємо пунктуацію з точних фраз для коректного порівняння з clean_text
-    exact_threats = [phrase.translate(str.maketrans('', '', string.punctuation)).lower() for phrase in getattr(config, 'EXACT_THREATS', [])]
-    found_words = [phrase for phrase in exact_threats if phrase in clean_text]
-    
-    # Якщо точних фраз немає, перевіряємо комбінацію: "дія" + "зброя"
-    if not found_words:
-        weapons = [w for w in getattr(config, 'WEAPONS', []) if w.lower() in clean_text]
-        actions = [a for a in getattr(config, 'ACTION_WORDS', []) if a.lower() in clean_text]
-        
-        # Сумісність зі старим TARGET_WORDS (якщо є)
-        legacy_targets = [w for w in getattr(config, 'TARGET_WORDS', []) if w.lower() in clean_text]
-        
-        if weapons and actions:
-            found_words = weapons + actions
-        elif legacy_targets and not hasattr(config, 'EXACT_THREATS'):
-            found_words = legacy_targets
+    prompt = f"""Ти — система аналізу повітряних тривог для міста КИЇВ. Твоє завдання — визначити тип повідомлення.
+Відповідай ЗАВЖДИ лише одним словом: CLEAR, THREAT або IGNORE. Жодних інших слів.
 
-    clear_words = [word for word in config.CLEAR_WORDS if word.lower() in clean_text]
-    
-    if clear_words:
+Правила:
+- CLEAR: якщо пишуть "відбій", "чисто", "дорозвідка", "небо чисте".
+- THREAT: ТІЛЬКИ якщо є пряма загроза РАКЕТ або БАЛІСТИКИ (ракети, балістика, кинджали, іскандери, швидкісні цілі, пуск, пуски) І ця загроза стосується КИЄВА або є загальною.
+- IGNORE: ігноруй будь-які згадки про шахеди, БпЛА, дрони або КАБи. Ігноруй попередження типу "загроза застосування балістичного озброєння" чи "активність авіації", якщо НЕМАЄ інформації про реальний пуск. Ігноруй ракети, якщо чітко вказано, що вони летять в ІНШІ міста (не на Київ). Ігноруй новини та звіти ППО.
+
+Приклади:
+Повідомлення: "Відбій загрози по областях"
+Відповідь: CLEAR
+
+Повідомлення: "Увага! Швидкісна ціль на Київ!"
+Відповідь: THREAT
+
+Повідомлення: "Пуски ракет з тактичної авіації!"
+Відповідь: THREAT
+
+Повідомлення: "Загроза застосування балістичного озброєння з півдня!"
+Відповідь: IGNORE
+
+Повідомлення: "Активність ворожої тактичної авіації! Загроза застосування авіаційних засобів ураження!"
+Відповідь: IGNORE
+
+Повідомлення: "Шахеди летять на Київ"
+Відповідь: IGNORE
+
+Повідомлення: "Ракета на Харків"
+Відповідь: IGNORE
+
+Повідомлення: "КАБи на Сумщину"
+Відповідь: IGNORE
+
+Повідомлення: "{text}"
+Відповідь:"""
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {getattr(config, 'GROQ_API_KEY', '')}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.0
+                }
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    ai_decision = data["choices"][0]["message"]["content"].strip().upper()
+                else:
+                    error_text = await response.text()
+                    logging.error(f"Помилка Groq API: {response.status} - Деталі: {error_text}")
+                    return
+    except Exception as e:
+        logging.error(f"Не вдалося підключитися до Groq API: {e}")
+        return
+
+    logging.info(f"[AI Рішення] {ai_decision}")
+
+    if "CLEAR" in ai_decision:
         unmuted_ids = user_manager.unmute_all_users()
         for uid in unmuted_ids:
             try:
-                await bot.send_message(chat_id=uid, text="Відбій тривоги/Чисто. Ви знову отримуватимете сповіщення про нові загрози.", reply_markup=get_keyboard())
+                await bot.send_message(chat_id=uid, text="Чисто. Ви знову отримуватимете сповіщення про нові загрози.", reply_markup=get_keyboard())
             except Exception as e:
                 logging.error(e)
-        return  # Зупиняємось, щоб не парсити повідомлення далі
-        
-    if found_words:
-        chat_title = message.chat.title
+        return
+
+    elif "THREAT" in ai_decision:
         chat_name = f"@{message.chat.username}" if message.chat.username else chat_title
-        
-        timestamp = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d:%m:%Y %H:%M")
-        words_str = ", ".join(found_words)
         full_text = message.text or message.caption or ""
         
-        alert_text = f"{timestamp}\nWARNING: {words_str}\n\n{chat_name} - {full_text}\n\nВас автоматично зам'ючено від спаму. Натисніть «Розм'ютити» на клавіатурі або дочекайтеся відбою."
+        alert_text = f"🚨 УВАГА!\n\n{chat_name} - {full_text}\n\nВас автоматично зам'ючено від спаму. Натисніть «Розм'ютити» на клавіатурі або дочекайтеся відбою."
         
         print(f"\n{'-'*30}\n{alert_text}\n{'-'*30}\n")
         

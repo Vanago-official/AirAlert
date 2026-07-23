@@ -100,3 +100,6 @@ class UserManager:
 
     def get_all_users(self):
         return list(self.users.values())
+
+    def get_user(self, user_id: int):
+        return self.users.get(user_id)
