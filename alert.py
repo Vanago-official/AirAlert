@@ -1,4 +1,6 @@
 import logging
+
+logger = logging.getLogger(__name__)
 import httpx
 import configparser
 
@@ -19,6 +21,6 @@ async def get_alert():
             
             return False
     except Exception as e:
-        logging.error(f"[API ERROR] Не вдалося перевірити тривогу: {e}")
+        logger.error(f"[API ERROR] Не вдалося перевірити тривогу: {e}")
         return False
 
