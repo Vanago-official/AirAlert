@@ -1,6 +1,4 @@
-pyrogram
-tgcrypto
-python-dotenv
-httpx
+aiogram
 aiosqlite
-groq
+alerts-in-ua
+python-dotenv

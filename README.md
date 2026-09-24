@@ -1,24 +1,42 @@
 # 🚨 Balistika Alarm Bot
 
-![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)
-![Pyrogram](https://img.shields.io/badge/Pyrogram-2.0%2B-green)
-![Gemini AI](https://img.shields.io/badge/AI-Google_Gemini-orange)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![aiogram](https://img.shields.io/badge/aiogram-3.x-green)
+![License](https://img.shields.io/badge/license-MIT-yellow)
 
-**Balistika Alarm Bot** is a smart Telegram bot designed to monitor radar channels in real-time. It uses Artificial Intelligence to analyze messages and instantly warn users about direct ballistic or cruise missile threats to their city.
-
----
-
-## ✨ Key Features
-
-- 🧠 **AI Analytics (Gemini 3.5 Flash Lite):** The AI filters out informational noise, fundraisers, and general aviation movements, reacting exclusively to real threats.
-- 🔄 **Hybrid Context Engine:** The bot "remembers" message history. If the first message was "Ballistics towards the city!", it will instantly react to a follow-up message like "two more targets" because it understands the context of the situation.
-- 📡 **Official Alerts Integration:** The bot connects to the official alerts API (`ubilling.net.ua`) and only activates radar analysis when air raid sirens are active in your city.
-- 🔕 **Smart Mute:** To prevent spam, the bot automatically mutes users until the all-clear signal after the first warning is sent (users can unmute themselves manually via a button).
-- ⚡️ **Userbot Integration:** Powered by Pyrogram, the bot acts as a fully-fledged user, allowing it to read any private or public radar channels and supergroups.
+**Balistika Alarm Bot** is a Telegram bot that monitors the official Ukrainian air alert API in real-time and instantly notifies subscribed users about direct missile threats to their city.
 
 ---
 
-## 🛠 Installation & Setup
+## ✨ Features
+
+- 🚀 **Missile Threat Filtering:** Polls the [alerts.in.ua](https://alerts.in.ua/) API every 10 seconds and broadcasts alerts exclusively for red-level missile threats (`ballistic_missiles`, `cruise_missiles`, `unspecified_missiles`), ignoring general or drone-only alerts.
+- 🔕 **Smart Mute:** After the first warning, users are automatically muted to prevent spam. They receive the all-clear message when the threat ends, or can unmute manually at any time.
+- 📊 **Status Dashboard:** Users can check the current alert state, active threat types, activation status, and mute status via a button.
+- 💾 **Persistent Storage:** User preferences (active/muted) are stored in a local SQLite database via `aiosqlite`.
+- 🔄 **Built-in Caching:** Uses the official `alerts-in-ua` client with HTTP caching to minimize API load.
+
+---
+
+## 🏗 Architecture
+
+```
+main.py       — Bot handlers, keyboard, alert loop
+alarm.py      — API client for alerts.in.ua
+database.py   — SQLite operations (users, mute, active)
+config.cfg    — City configuration
+.env          — Bot token and API key (not committed)
+```
+
+**How the alert loop works:**
+
+1. Every 10 seconds, the bot queries the alerts API for the configured city.
+2. If a new threat is detected (`alert_level == "red"` AND missile threat is present), it broadcasts `🔴 Danger!` to all active, unmuted users and mutes everyone.
+3. When the threat ends (all-clear or downgrade), it broadcasts `🟢 Clear.` to all muted users and resets mute status.
+
+---
+
+## 🛠 Installation
 
 ### 1. Clone the repository
 ```bash
@@ -28,47 +46,65 @@ cd BalistikaAlarm
 
 ### 2. Create a virtual environment and install dependencies
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Configure the environment
-Create a `.env` file in the root of the project and fill it with your credentials:
-```env
-API_ID=your_api_id
-API_HASH=your_api_hash
-BOT_TOKEN=your_bot_token
-AI_KEY=your_google_gemini_api_key
+### 3. Configure environment variables
+Copy the example and fill in your credentials:
+```bash
+cp .env.example .env
 ```
-*(You can obtain your API_ID and API_HASH at [my.telegram.org](https://my.telegram.org))*
 
-### 4. Configure radars and your city
-Edit the `config.cfg` file:
+Edit `.env`:
+```env
+BOT_TOKEN=your_telegram_bot_token # Token from @BotFather
+ALARM=your_alerts_api_token       # Token from https://alerts.in.ua/
+```
+
+### 4. Configure your city
+Edit `config.cfg`:
 ```ini
 [Settings]
-ALERT_API=https://ubilling.net.ua/aerialalerts/
 CITY=м. Київ
-CHANNELS=-1001223955273, -1001361050199, -1001867382165
 ```
-> **Note:** Enter the exact numerical channel IDs, making sure they include the `-100` prefix.
 
-### 5. First Run
+> **Note:** `CITY` must match the exact `location_title` from the alerts.in.ua API (e.g., `м. Київ` for Kyiv city).
+
+### 5. Run the bot
 ```bash
 python main.py
 ```
-During the first launch, the script will ask you to enter your phone number and Telegram confirmation code. This is necessary to authorize the `userbot.session` that will read the radar channels on your behalf.
 
 ---
 
-## 🏗 How it Works (Architecture)
+## 🤖 Bot Commands & Buttons
 
-1. **Background Monitoring (No Alert):** The userbot silently reads all messages from the radars and buffers the last 10 messages.
-2. **Alert Start:** As soon as the API confirms an air raid siren in the city, the bot "wakes up" and sends the message buffer to the AI for analysis.
-3. **AI Analysis:** Gemini analyzes the history and the current threat status. If the AI responds with `THREAT`, the bot immediately broadcasts the warning to all active users.
-4. **All-Clear:** If the AI responds with `CLEAR` (e.g., "reconnaissance", "clear"), or if the official siren ends — the bot resets the threat status and unmutes all users.
+| Button | Action |
+|--------|--------|
+| ✅ Activate | Subscribe to threat alerts |
+| 🛑 Deactivate | Unsubscribe from all alerts |
+| 🔕 Mute | Silence alerts until the all-clear signal |
+| 🔔 Unmute | Resume receiving alerts |
+| 📊 Status | Show current alert state and user settings |
+| ℹ️ Info | About the bot |
 
 ---
 
-## 📜 License
-This project was created to protect lives and ensure rapid response to threats. Feel free to use it, but remember: the bot is only an auxiliary tool and does not replace official emergency alert systems. Stay safe! 🇺🇦
+## 📁 Project Structure
+
+| File | Description |
+|------|-------------|
+| `main.py` | Bot entry point, command handlers, alert broadcast loop |
+| `alarm.py` | Fetches and parses alert data from the API |
+| `database.py` | Async SQLite operations for user management |
+| `config.cfg` | City configuration |
+| `.env` | Secret tokens (not committed to git) |
+| `requirements.txt` | Python dependencies |
+
+---
+
+## ⚠️ Disclaimer
+
+This bot is a personal project and is intended as an **auxiliary tool only**. It does not replace official emergency alert systems. Stay safe! 🇺🇦
