@@ -2,3 +2,6 @@ aiogram
 aiosqlite
 alerts-in-ua
 python-dotenv
+google-genai
+kurigram
+tgcrypto

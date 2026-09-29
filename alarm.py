@@ -1,7 +1,7 @@
+import configparser
 import logging
 from os import getenv
 
-import configparser
 from dotenv import load_dotenv
 
 load_dotenv()
