@@ -14,15 +14,15 @@ async def init_db():
             user_id INTEGER PRIMARY KEY,
             active INTEGER DEFAULT 1,
             is_muted INTEGER DEFAULT 0,
-            clear_sending INTEGER DEFAULT 1,
-            ai_clear_sending INTEGER DEFAULT 1)
+            clear_sending INTEGER DEFAULT 1)
         """)
 
-        # Migration: add ai_clear_sending column if it doesn't exist
+        # Migration: drop the ai_clear_sending column left over from the removed AI feature
         try:
-            await db.execute("ALTER TABLE users ADD COLUMN ai_clear_sending INTEGER DEFAULT 1")
+            await db.execute("ALTER TABLE users DROP COLUMN ai_clear_sending")
+            logger.info("[DATABASE] Dropped obsolete column ai_clear_sending")
         except aiosqlite.OperationalError:
-            pass  # Column already exists
+            pass  # Column does not exist
 
         await db.commit()
 
@@ -62,17 +62,6 @@ async def get_muted_users():
         rows = await cursor.fetchall()
         return [row[0] for row in rows]
 
-async def get_ai_clear_users():
-    async with (
-        aiosqlite.connect(DB_NAME) as db,
-        db.execute(
-            "SELECT user_id FROM users WHERE is_muted = 1 AND active = 1 AND ai_clear_sending = 1"
-        ) as cursor,
-    ):
-        rows = await cursor.fetchall()
-        return [row[0] for row in rows]
-
-
 async def set_all_mutes(flag):
     logger.info(f"[DATABASE] All is_muted set to {flag}")
     async with aiosqlite.connect(DB_NAME) as db:
@@ -92,12 +81,6 @@ async def set_clear_sending(user_id, flag):
         await db.execute("UPDATE users SET clear_sending = ? WHERE user_id = ?", (flag, user_id))
         await db.commit()
 
-async def set_ai_clear_sending(user_id, flag):
-    logger.info(f"[DATABASE] User {user_id} ai_clear_sending set to {flag}")
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET ai_clear_sending = ? WHERE user_id = ?", (flag, user_id))
-        await db.commit()
-
 async def set_user_active(user_id, flag):
     logger.info(f"[DATABASE] User {user_id} active set to {flag}")
     async with aiosqlite.connect(DB_NAME) as db:
@@ -109,7 +92,7 @@ async def get_user_info(user_id):
     logger.info(f"[DATABASE] Get info for user {user_id}")
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute(
-            "SELECT active, is_muted, clear_sending, ai_clear_sending FROM users WHERE user_id = ?", (user_id,)
+            "SELECT active, is_muted, clear_sending FROM users WHERE user_id = ?", (user_id,)
         )
         row = await cursor.fetchone()
         return row
