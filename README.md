@@ -4,14 +4,14 @@
 ![aiogram](https://img.shields.io/badge/aiogram-3.x-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
-**AirAlert** is a Telegram bot that monitors the official Ukrainian alert API and notifies subscribed users whenever any alert starts or ends in their city, naming the alert type.
+**AirAlert** is a Telegram bot that monitors the official Ukrainian alert API and notifies subscribed users with one line whenever the alert level in their city changes, e.g. `🔴 Red level — missile threat`.
 
 ---
 
 ## ✨ Features
 
 - 🚨 **Any Alert:** Polls the [alerts.in.ua](https://alerts.in.ua/) API every 10 seconds and detects every alert type (air raid, artillery, urban fights, chemical, nuclear) and every threat (missiles, drones, aviation, guided bombs, etc.).
-- 📨 **Typed Messages:** Each message says which alerts started or ended.
+- 📨 **One-Line Messages:** The bot sends a message only when the alert level changes: `<level> — <threat>`.
 - 🎛 **Per-Type Toggles:** Every alert type can be turned on or off in Settings → 🎛 Alert types.
 - 🔕 **Mute:** Mute notifications until all alerts end. You still get the final all-clear.
 - 🔕 **Auto-mute mode:** Optional setting. After the first alert message you are muted automatically until the all-clear.
@@ -34,22 +34,38 @@ config.cfg     — City configuration
 **How the alert loop works:**
 
 1. The bot queries the alerts API every 10 seconds and collects all `alert_type` and `threat_type` values for the city.
-2. **Started:** New types are sent to active, unmuted users who have those types enabled. Users with auto-mute on are muted right after.
-3. **Ended:** Types that disappeared are sent to unmuted users with clear messages on.
-4. **All clear:** When no alerts remain, muted users also get the message, and all mutes are lifted.
+2. **Level changed** (none, yellow, red): active, unmuted users get one line built from the types they have enabled. Threat changes at the same level send nothing. Users with auto-mute on are muted right after.
+3. **All clear:** When no alerts remain, users with clear messages on get `🟢 All clear` (muted users too), and all mutes are lifted.
+4. If an alert has no `alert_level` in the API data, the level is shown as `🚨 Alert`.
 5. If the API request fails, the bot skips that check. It does not send a false all-clear.
 
 ---
 
 ## 📨 Message Types
 
-| Type | Header | Sent to |
-|------|--------|---------|
-| Started | `🚨 Alert started — <city>` | Active, unmuted users with the type enabled |
-| Ended | `🟢 Alert ended — <city>` | Active, unmuted users with clear on and the type enabled; other alerts still active |
-| All clear | `🟢 All clear — <city>` | Active users (muted too) with clear on and the type enabled; no alerts left |
+Format: `<level> — <threats> threat`, or `🟢 All clear`.
 
-Each message lists the types under the header, e.g. `• 🛸 Drones (UAV)`.
+| Level | When |
+|-------|------|
+| `🔴 Red level` | API `alert_level` is `red` |
+| `🟡 Yellow level` | API `alert_level` is `yellow` |
+| `🚨 Alert` | Alert active, no `alert_level` |
+
+Threat words, most dangerous first. Several active groups are joined: `missile, drone threat`.
+
+| Word | Alert types |
+|------|-------------|
+| `nuclear` | `nuclear` |
+| `chemical` | `chemical` |
+| `missile` | `ballistic_missiles`, `cruise_missiles`, `unspecified_missiles`, `mig31k_departure` |
+| `guided bomb` | `guided_aerial_bombs` |
+| `aviation` | `strategic_aircraft_activity`, `tactic_aircraft_activity` |
+| `drone` | `drones` |
+| `artillery` | `artillery_shelling` |
+| `urban combat` | `urban_fights` |
+| `air raid` | Only when none of the above: `air_raid`, `air_defense`, `unknown` |
+
+Toggleable alert types (Settings → 🎛 Alert types):
 
 | Key | Label |
 |-----|-------|

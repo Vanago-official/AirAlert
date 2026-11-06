@@ -45,6 +45,46 @@ def kind_label(kind):
     return ALERT_KINDS.get(kind, f"❓ {kind}")
 
 
+# Threat groups for the one-line level message, most dangerous first.
+# Kinds not listed here (air_raid, air_defense, unknown, new API values)
+# fall back to "air raid".
+THREAT_GROUPS = [
+    ("nuclear", {"nuclear"}),
+    ("chemical", {"chemical"}),
+    (
+        "missile",
+        {
+            "ballistic_missiles",
+            "cruise_missiles",
+            "unspecified_missiles",
+            "mig31k_departure",
+        },
+    ),
+    ("guided bomb", {"guided_aerial_bombs"}),
+    ("aviation", {"strategic_aircraft_activity", "tactic_aircraft_activity"}),
+    ("drone", {"drones"}),
+    ("artillery", {"artillery_shelling"}),
+    ("urban combat", {"urban_fights"}),
+]
+
+LEVEL_NAMES = {
+    "red": "🔴 Red level",
+    "yellow": "🟡 Yellow level",
+    "alert": "🚨 Alert",  # alert without alert_level in the API data
+}
+
+
+def threat_summary(kinds):
+    """'missile, drone threat' style summary of the given kinds."""
+    words = [word for word, group in THREAT_GROUPS if kinds & group]
+    return f"{', '.join(words) if words else 'air raid'} threat"
+
+
+def level_line(level, kinds):
+    """One-line message, e.g. '🔴 Red level — missile threat'."""
+    return f"{LEVEL_NAMES.get(level, LEVEL_NAMES['alert'])} — {threat_summary(kinds)}"
+
+
 def sort_kinds(kinds):
     """Sort kinds in ALERT_KINDS order; unknown kinds go last, alphabetically."""
     return sorted(kinds, key=lambda k: (_KIND_ORDER.get(k, len(_KIND_ORDER)), k))

@@ -18,7 +18,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from alarm import ALERT_KINDS, CITY, get_alerts, kind_label, sort_kinds
+from alarm import ALERT_KINDS, CITY, get_alerts, kind_label, level_line, sort_kinds
 from database import (
     add_user,
     apply_auto_mute,
@@ -45,12 +45,10 @@ logging.basicConfig(
 BOT_TOKEN = getenv("BOT_TOKEN")
 
 active_kinds = set()  # alert_type and threat_type values active right now
-current_alert_level = None  # None, "yellow", "red"
+current_level = None  # None, "yellow", "red", "alert" (active without alert_level)
+episode_kinds = set()  # every kind seen since the alert started, for the all-clear
 
-LEVEL_LABELS = {
-    "red": "🔴 Red",
-    "yellow": "🟡 Yellow",
-}
+ALL_CLEAR_TEXT = "🟢 All clear"
 
 bot = Bot(BOT_TOKEN)  # pyright: ignore[reportArgumentType]
 dp = Dispatcher()
@@ -60,45 +58,32 @@ def kinds_list(kinds):
     return "\n".join(f"• {kind_label(k)}" for k in sort_kinds(kinds))
 
 
-async def broadcast(kinds, header, recipients):
-    """Send header + the kinds each user has enabled. Skip users with none enabled.
+async def send_to(user_id, text):
+    try:
+        await bot.send_message(chat_id=user_id, text=text)
+        await asyncio.sleep(0.05)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[BOT ERROR] Failed to send message to user {user_id}: {e}")
+        return False
 
-    Return the ids of users the message was sent to.
-    """
+
+async def send_level(level, kinds):
+    """One line about the new level, built from the kinds each user has enabled."""
     sent = []
-    for user_id, disabled in recipients:
+    for user_id, disabled in await get_recipients():
         user_kinds = kinds - disabled
-        if not user_kinds:
-            continue
-        try:
-            await bot.send_message(
-                chat_id=user_id,
-                text=f"{header}\n\n{kinds_list(user_kinds)}",
-                parse_mode=ParseMode.HTML,
-            )
+        if user_kinds and await send_to(user_id, level_line(level, user_kinds)):
             sent.append(user_id)
-            await asyncio.sleep(0.05)
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"[BOT ERROR] Failed to send message to user {user_id}: {e}")
-    return sent
-
-
-async def send_started(kinds):
-    recipients = await get_recipients()
-    sent = await broadcast(kinds, f"🚨 <b>Alert started — {escape(CITY)}</b>", recipients)
     # Auto-mute mode: after the first alert, stay silent until the all-clear
     await apply_auto_mute(sent)
 
 
-async def send_ended(kinds, all_clear):
-    # Muted users only hear about the final all-clear, then their mute is lifted
-    recipients = await get_recipients(include_muted=all_clear, require_clear=True)
-    header = (
-        f"🟢 <b>All clear — {escape(CITY)}</b>"
-        if all_clear
-        else f"🟢 <b>Alert ended — {escape(CITY)}</b>"
-    )
-    await broadcast(kinds, header, recipients)
+async def send_all_clear(kinds):
+    # Muted users get the all-clear too, then their mute is lifted
+    for user_id, disabled in await get_recipients(include_muted=True, require_clear=True):
+        if kinds - disabled:
+            await send_to(user_id, ALL_CLEAR_TEXT)
 
 
 replyKeyboard = ReplyKeyboardMarkup(
@@ -122,8 +107,8 @@ async def command_start_handler(message):
     await add_user(message.from_user.id)
 
     await message.answer(
-        f"👋 Hi! I'm AirAlert. I monitor every type of alert in {CITY} "
-        "and tell you which one started or ended.\n\n"
+        f"👋 Hi! I'm AirAlert. I monitor alerts in {CITY} "
+        "and tell you when the alert level changes.\n\n"
         "Choose which alerts you want in ⚙️ Settings → 🎛 Alert types.\n\n"
         "Use the buttons below to control the bot:",
         reply_markup=replyKeyboard,
@@ -157,10 +142,9 @@ async def status_button(message):
     enabled_count = len(set(ALERT_KINDS) - disabled)
 
     if active_kinds:
-        level_text = LEVEL_LABELS.get(current_alert_level, "—")
         alert_section = (
-            f"🚨 <b>Alerts in {escape(CITY)}:</b>\n{kinds_list(active_kinds)}\n\n"
-            f"🎚 <b>Level:</b> {level_text}"
+            f"🚨 <b>Alerts in {escape(CITY)}:</b> {escape(level_line(current_level, active_kinds))}\n"
+            f"{kinds_list(active_kinds)}"
         )
     else:
         alert_section = f"🚨 <b>Alerts in {escape(CITY)}:</b> 🟢 None"
@@ -184,8 +168,8 @@ async def info_button(message):
         "🚨 <b>AirAlert</b>\n"
         "Created by @vanago_official.\n\n"
         f"Monitors official alert data for {escape(CITY)} in real-time and sends "
-        "a notification when any alert starts or ends, naming its type "
-        "(air raid, drones, ballistic missiles, artillery, etc.).\n\n"
+        "one line when the alert level changes, e.g. "
+        "«🔴 Red level — missile threat», and «🟢 All clear» when it ends.\n\n"
         "🔘 <b>Buttons:</b>\n\n"
         "🔔 <b>Unmute</b> — receive notifications again.\n"
         "🔕 <b>Mute</b> — mute notifications until all alerts end.\n"
@@ -343,30 +327,31 @@ async def back_to_main(message):
 
 
 async def alert_loop():
-    global active_kinds, current_alert_level
+    global active_kinds, current_level, episode_kinds
     while True:
         try:
             result = await get_alerts()
             if result is not None:
-                kinds, level = result
-                started = kinds - active_kinds
-                ended = active_kinds - kinds
+                kinds, api_level = result
+                level = (api_level or "alert") if kinds else None
+                previous_level = current_level
 
                 logger.info(
                     f"[ALERT] Level: {level} | Active: {sorted(kinds)} | "
-                    f"Started: {sorted(started)} | Ended: {sorted(ended)}"
+                    f"Previous level: {previous_level}"
                 )
 
                 active_kinds = kinds
-                current_alert_level = level
+                current_level = level
+                episode_kinds |= kinds
 
-                if started:
-                    await send_started(started)
-
-                if ended:
-                    all_clear = not kinds
-                    await send_ended(ended, all_clear)
-                    if all_clear:
+                # Notify only when the level changes; threat changes alone are silent
+                if level != previous_level:
+                    if level:
+                        await send_level(level, kinds)
+                    else:
+                        await send_all_clear(episode_kinds)
+                        episode_kinds = set()
                         await set_all_mutes(0)
 
         except Exception as e:  # noqa: BLE001
