@@ -1,20 +1,23 @@
-# 🚨 Balistika Alarm Bot
+# 🚨 AirAlert
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![aiogram](https://img.shields.io/badge/aiogram-3.x-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
-**Balistika Alarm Bot** is a Telegram bot that monitors the official Ukrainian air alert API to instantly notify subscribed users about direct missile threats to their city.
+**AirAlert** is a Telegram bot that monitors the official Ukrainian alert API and notifies subscribed users whenever any alert starts or ends in their city, naming the alert type.
 
 ---
 
 ## ✨ Features
 
-- 🚀 **Missile Threat Filtering:** Polls the [alerts.in.ua](https://alerts.in.ua/) API every 10 seconds and activates exclusively for red-level missile threats (`ballistic_missiles`, `cruise_missiles`, `unspecified_missiles`).
-- 🔕 **Smart Mute:** After the first warning, users are automatically muted to prevent spam. They receive the all-clear message when the threat ends, or can unmute manually at any time to receive subsequent warnings.
-- ⚙️ **Granular Settings:** Users can individually opt in or out of official "Clear" messages.
-- 📊 **Status Dashboard:** Users can check the current alert state, active threat types, activation status, and mute status via a button.
-- 💾 **Persistent Storage:** User preferences are stored in a local SQLite database via `aiosqlite`. Schema changes are applied automatically on startup, so existing databases keep working after updates.
+- 🚨 **Any Alert:** Polls the [alerts.in.ua](https://alerts.in.ua/) API every 10 seconds and detects every alert type (air raid, artillery, urban fights, chemical, nuclear) and every threat (missiles, drones, aviation, guided bombs, etc.).
+- 📨 **Typed Messages:** Each message says which alerts started or ended.
+- 🎛 **Per-Type Toggles:** Every alert type can be turned on or off in Settings → 🎛 Alert types.
+- 🔕 **Mute:** Mute notifications until all alerts end. You still get the final all-clear.
+- 🔕 **Auto-mute mode:** Optional setting. After the first alert message you are muted automatically until the all-clear.
+- ⚙️ **Clear Messages:** Opt in or out of end-of-alert messages.
+- 📊 **Status Dashboard:** Shows active alerts, alert level and your settings.
+- 💾 **Persistent Storage:** SQLite via `aiosqlite`. Schema changes are applied automatically on startup.
 
 ---
 
@@ -22,17 +25,49 @@
 
 ```text
 main.py        — Bot entry point, handlers, alert broadcast loop
-alarm.py       — API client for alerts.in.ua
-database.py    — SQLite operations (users, mute, active, clear preferences)
+alarm.py       — API client for alerts.in.ua, list of alert types
+database.py    — SQLite operations (users, mute, active, clear, disabled alert types)
 config.cfg     — City configuration
 .env           — Tokens and API keys (not committed)
 ```
 
 **How the alert loop works:**
 
-1. **Idle Mode:** The bot queries the alerts API every 10 seconds.
-2. **Official Alert:** If a new threat is detected (`alert_level == "red"` AND a missile threat is present), it broadcasts `🔴 Danger!` to all active, unmuted users and mutes everyone.
-3. **End of Alert:** When the official API downgrades or clears the alert, it broadcasts `🟢 Clear.` to muted users who opted in, and unmutes everyone.
+1. The bot queries the alerts API every 10 seconds and collects all `alert_type` and `threat_type` values for the city.
+2. **Started:** New types are sent to active, unmuted users who have those types enabled. Users with auto-mute on are muted right after.
+3. **Ended:** Types that disappeared are sent to unmuted users with clear messages on.
+4. **All clear:** When no alerts remain, muted users also get the message, and all mutes are lifted.
+5. If the API request fails, the bot skips that check. It does not send a false all-clear.
+
+---
+
+## 📨 Message Types
+
+| Type | Header | Sent to |
+|------|--------|---------|
+| Started | `🚨 Alert started — <city>` | Active, unmuted users with the type enabled |
+| Ended | `🟢 Alert ended — <city>` | Active, unmuted users with clear on and the type enabled; other alerts still active |
+| All clear | `🟢 All clear — <city>` | Active users (muted too) with clear on and the type enabled; no alerts left |
+
+Each message lists the types under the header, e.g. `• 🛸 Drones (UAV)`.
+
+| Key | Label |
+|-----|-------|
+| `air_raid` | 🚨 Air raid |
+| `artillery_shelling` | 💥 Artillery shelling |
+| `urban_fights` | ⚔️ Urban fights |
+| `chemical` | ☣️ Chemical danger |
+| `nuclear` | ☢️ Nuclear danger |
+| `ballistic_missiles` | 🚀 Ballistic missiles |
+| `cruise_missiles` | 🚀 Cruise missiles |
+| `unspecified_missiles` | 🚀 Missiles (unspecified) |
+| `mig31k_departure` | ✈️ MiG-31K departure (Kinzhal) |
+| `strategic_aircraft_activity` | ✈️ Strategic aviation |
+| `tactic_aircraft_activity` | ✈️ Tactical aviation |
+| `drones` | 🛸 Drones (UAV) |
+| `guided_aerial_bombs` | 💣 Guided aerial bombs |
+| `air_defense` | 🛡 Air defense active |
+| `unknown` | ❓ Unknown threat |
 
 ---
 
@@ -40,8 +75,8 @@ config.cfg     — City configuration
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/Vanago-official/BalistikaAlarm.git
-cd BalistikaAlarm
+git clone https://github.com/Vanago-official/AirAlert.git
+cd AirAlert
 ```
 
 ### 2. Create a virtual environment and install dependencies
@@ -85,7 +120,7 @@ python main.py
 
 | Button | Action |
 |--------|--------|
-| 🔕 Mute | Silence alerts until the all-clear signal |
+| 🔕 Mute | Silence alerts until all alerts end |
 | 🔔 Unmute | Resume receiving alerts |
 | 📊 Status | Show current alert state and user settings |
 | ⚙️ Settings | Open the settings menu |
@@ -95,9 +130,11 @@ python main.py
 
 | Button | Action |
 |--------|--------|
-| 🟢 Activate | Subscribe to threat alerts |
+| 🟢 Activate | Subscribe to alerts |
 | 🛑 Deactivate | Unsubscribe from all alerts |
-| 🟢 Send clear / 🔴 Don't send clear | Toggle official "Clear" messages |
+| 🟢 Send clear / 🔴 Don't send clear | Toggle end-of-alert messages |
+| 🔕 Auto-mute: ON / 🔔 Auto-mute: OFF | Toggle auto-mute until all-clear |
+| 🎛 Alert types | Turn each alert type on (✅) or off (❌), or all at once |
 | 🔙 Back | Return to the main menu |
 
 ---

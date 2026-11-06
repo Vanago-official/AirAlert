@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from html import escape
 from os import getenv
 
 from dotenv import load_dotenv
@@ -9,17 +10,27 @@ load_dotenv()
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
-from alarm import get_alert
+from alarm import ALERT_KINDS, CITY, get_alerts, kind_label, sort_kinds
 from database import (
     add_user,
-    get_active_users,
-    get_muted_users,
+    apply_auto_mute,
+    get_disabled_kinds,
+    get_recipients,
     get_user_info,
     init_db,
+    set_all_kinds_enabled,
     set_all_mutes,
+    set_auto_mute,
     set_clear_sending,
+    set_kind_enabled,
     set_user_active,
     set_user_mute,
 )
@@ -33,69 +44,61 @@ logging.basicConfig(
 # Config and ENV
 BOT_TOKEN = getenv("BOT_TOKEN")
 
-alert_status = False
+active_kinds = set()  # alert_type and threat_type values active right now
 current_alert_level = None  # None, "yellow", "red"
-current_threat_types = []  # ["drones", "ballistic_missiles", ...]
-current_alert_type = None  # "air_raid", "artillery_shelling", etc.
-
-MISSILE_THREATS = {
-    "ballistic_missiles",
-    "cruise_missiles",
-    "unspecified_missiles",
-}
-
-ALERT_TYPE_LABELS = {
-    "air_raid": "Air Raid",
-    "artillery_shelling": "Artillery Shelling",
-    "urban_fights": "Urban Fights",
-    "chemical": "Chemical Danger",
-    "nuclear": "Nuclear Danger",
-}
-
-THREAT_LABELS = {
-    "ballistic_missiles": "🚀 Ballistic missiles",
-    "cruise_missiles": "🚀 Cruise missiles",
-    "unspecified_missiles": "🚀 Missiles (unspecified)",
-    "mig31k_departure": "✈️ MiG-31K departure (Kinzhal)",
-    "strategic_aircraft_activity": "✈️ Strategic aviation",
-    "tactic_aircraft_activity": "✈️ Tactical aviation",
-    "drones": "🛸 Drones (UAV)",
-    "guided_aerial_bombs": "💣 Guided aerial bombs",
-    "air_defense": "🛡 Air defense active",
-    "unknown": "❓ Unknown threat",
-}
 
 LEVEL_LABELS = {
-    "red": "🔴 Red (missile/massive drone threat)",
-    "yellow": "🟡 Yellow (drone threat)",
+    "red": "🔴 Red",
+    "yellow": "🟡 Yellow",
 }
 
 bot = Bot(BOT_TOKEN)  # pyright: ignore[reportArgumentType]
 dp = Dispatcher()
 
 
-async def send_danger_message():
-    users = await get_active_users()
-    await set_all_mutes(1)
+def kinds_list(kinds):
+    return "\n".join(f"• {kind_label(k)}" for k in sort_kinds(kinds))
 
-    for user in users:
+
+async def broadcast(kinds, header, recipients):
+    """Send header + the kinds each user has enabled. Skip users with none enabled.
+
+    Return the ids of users the message was sent to.
+    """
+    sent = []
+    for user_id, disabled in recipients:
+        user_kinds = kinds - disabled
+        if not user_kinds:
+            continue
         try:
-            await bot.send_message(chat_id=user, text="🔴 Danger!")
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"{header}\n\n{kinds_list(user_kinds)}",
+                parse_mode=ParseMode.HTML,
+            )
+            sent.append(user_id)
             await asyncio.sleep(0.05)
         except Exception as e:  # noqa: BLE001
-            logger.error(f"[BOT ERROR] Failed to send message to user {user}: {e}")
+            logger.error(f"[BOT ERROR] Failed to send message to user {user_id}: {e}")
+    return sent
 
 
-async def send_clear_message(text: str = "🟢 Clear."):
-    users = await get_muted_users()
-    await set_all_mutes(0)
+async def send_started(kinds):
+    recipients = await get_recipients()
+    sent = await broadcast(kinds, f"🚨 <b>Alert started — {escape(CITY)}</b>", recipients)
+    # Auto-mute mode: after the first alert, stay silent until the all-clear
+    await apply_auto_mute(sent)
 
-    for user in users:
-        try:
-            await bot.send_message(chat_id=user, text=text)
-            await asyncio.sleep(0.05)
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"[BOT ERROR] Failed to send message to user {user}: {e}")
+
+async def send_ended(kinds, all_clear):
+    # Muted users only hear about the final all-clear, then their mute is lifted
+    recipients = await get_recipients(include_muted=all_clear, require_clear=True)
+    header = (
+        f"🟢 <b>All clear — {escape(CITY)}</b>"
+        if all_clear
+        else f"🟢 <b>Alert ended — {escape(CITY)}</b>"
+    )
+    await broadcast(kinds, header, recipients)
 
 
 replyKeyboard = ReplyKeyboardMarkup(
@@ -119,7 +122,10 @@ async def command_start_handler(message):
     await add_user(message.from_user.id)
 
     await message.answer(
-        "👋 Hi! I monitor direct missile threats to Kyiv.\n\nUse the buttons below to control the bot:",
+        f"👋 Hi! I'm AirAlert. I monitor every type of alert in {CITY} "
+        "and tell you which one started or ended.\n\n"
+        "Choose which alerts you want in ⚙️ Settings → 🎛 Alert types.\n\n"
+        "Use the buttons below to control the bot:",
         reply_markup=replyKeyboard,
     )
 
@@ -128,7 +134,9 @@ async def command_start_handler(message):
 @dp.message(F.text.regexp(r"^🔕 Mute$"))
 async def mute_button(message):
     await set_user_mute(message.from_user.id, 1)
-    await message.answer("🔕 Alerts muted until all-clear.", reply_markup=replyKeyboard)
+    await message.answer(
+        "🔕 Alerts muted until all alerts end.", reply_markup=replyKeyboard
+    )
 
 
 @dp.message(F.text.regexp(r"^🔔 Unmute$"))
@@ -145,31 +153,27 @@ async def status_button(message):
         await message.answer("⚠️ User not found. Send /start to register.")
         return
 
-    if current_alert_level:
-        status_icon = "🔴" if current_alert_level == "red" else "🟡"
-        level_text = LEVEL_LABELS.get(
-            current_alert_level, f"{status_icon} {current_alert_level.capitalize()}"
+    disabled = await get_disabled_kinds(message.from_user.id)
+    enabled_count = len(set(ALERT_KINDS) - disabled)
+
+    if active_kinds:
+        level_text = LEVEL_LABELS.get(current_alert_level, "—")
+        alert_section = (
+            f"🚨 <b>Alerts in {escape(CITY)}:</b>\n{kinds_list(active_kinds)}\n\n"
+            f"🎚 <b>Level:</b> {level_text}"
         )
-        status_lines = [f"🚨 *Air Alert:* {status_icon} {level_text}"]
-
-        if current_threat_types:
-            threat_texts = [THREAT_LABELS.get(t, t) for t in current_threat_types]
-            status_lines.append(f"🎯 *Threat Type:* {', '.join(threat_texts)}")  # pyright: ignore[reportArgumentType, reportCallIssue]
-        if current_alert_type and current_alert_type != "air_raid":
-            type_text = ALERT_TYPE_LABELS.get(current_alert_type, current_alert_type)
-            status_lines.append(f"📢 *Alert Type:* {type_text}")
-
-        alert_section = "\n".join(status_lines)
     else:
-        alert_section = "🚨 *Air Alert:* 🟢 Inactive"
+        alert_section = f"🚨 <b>Alerts in {escape(CITY)}:</b> 🟢 None"
 
     await message.answer(
-        f"📊 *Current Status:*\n\n"
+        f"📊 <b>Current Status:</b>\n\n"
         f"{alert_section}\n\n"
-        f"🟢 *Active:* {'Yes' if info[0] else 'No'}\n"
-        f"🔕 *Muted:* {'Yes' if info[1] else 'No'}\n"
-        f"📩 *Send Clear:* {'Yes' if info[2] == 1 else 'No'}",
-        parse_mode=ParseMode.MARKDOWN,
+        f"🟢 <b>Active:</b> {'Yes' if info[0] else 'No'}\n"
+        f"🔕 <b>Muted:</b> {'Yes' if info[1] else 'No'}\n"
+        f"📩 <b>Send Clear:</b> {'Yes' if info[2] == 1 else 'No'}\n"
+        f"🔕 <b>Auto-mute:</b> {'On' if info[3] == 1 else 'Off'}\n"
+        f"🎛 <b>Alert types on:</b> {enabled_count}/{len(ALERT_KINDS)}",
+        parse_mode=ParseMode.HTML,
         reply_markup=replyKeyboard,
     )
 
@@ -177,19 +181,22 @@ async def status_button(message):
 @dp.message(F.text.regexp(r"^ℹ️ Info$"))
 async def info_button(message):
     info_text = (
-        "Created by @vanago\\_official\\.\n\n"
-        r"Monitors official air alert data in real\-time and sends instant notifications "
-        "about direct missile threats to Kyiv\\.\n\n"
-        "🔘 *Buttons:*\n\n"
-        "🟢 *Activate* — activates the bot\\. You will receive alerts about missile threats\\.\n"
-        "🛑 *Deactivate* — deactivates the bot\\. All alerts are disabled\\.\n"
-        "🔔 *Unmute* — unmutes alerts so you receive notifications again\\.\n"
-        "🔕 *Mute* — mutes alerts until the current threat ends \\(all\\-clear\\)\\.\n"
-        "📊 *Status* — shows the current air alert status and your settings\\.\n"
-        r"ℹ️ *Info* — shows this information message\."
+        "🚨 <b>AirAlert</b>\n"
+        "Created by @vanago_official.\n\n"
+        f"Monitors official alert data for {escape(CITY)} in real-time and sends "
+        "a notification when any alert starts or ends, naming its type "
+        "(air raid, drones, ballistic missiles, artillery, etc.).\n\n"
+        "🔘 <b>Buttons:</b>\n\n"
+        "🔔 <b>Unmute</b> — receive notifications again.\n"
+        "🔕 <b>Mute</b> — mute notifications until all alerts end.\n"
+        "📊 <b>Status</b> — current alerts and your settings.\n"
+        "⚙️ <b>Settings</b> — activate/deactivate the bot, toggle end-of-alert "
+        "messages, auto-mute (silence everything after the first alert until "
+        "the all-clear), choose alert types.\n"
+        "ℹ️ <b>Info</b> — this message."
     )
     await message.answer(
-        info_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=replyKeyboard
+        info_text, parse_mode=ParseMode.HTML, reply_markup=replyKeyboard
     )
 
 
@@ -200,6 +207,7 @@ async def settings(message):
         return
 
     btn_text = "🟢 Send clear" if info[2] == 1 else "🔴 Don't send clear"
+    auto_mute_text = "🔕 Auto-mute: ON" if info[3] == 1 else "🔔 Auto-mute: OFF"
 
     SettingsKeyboard = ReplyKeyboardMarkup(
         keyboard=[
@@ -208,6 +216,8 @@ async def settings(message):
                 KeyboardButton(text="🛑 Deactivate"),
             ],
             [KeyboardButton(text=btn_text)],
+            [KeyboardButton(text=auto_mute_text)],
+            [KeyboardButton(text="🎛 Alert types")],
             [KeyboardButton(text="🔙 Back")],
         ],
         resize_keyboard=True,
@@ -219,6 +229,8 @@ async def settings(message):
         "🛑 Deactivate": "🛑 Bot deactivated. Alerts disabled.",
         "🟢 Send clear": "🔴 Clear messages disabled. You won't receive clear messages.",
         "🔴 Don't send clear": "🟢 Clear messages enabled. You will receive clear messages.",
+        "🔕 Auto-mute: ON": "🔔 Auto-mute disabled. You will receive every alert.",
+        "🔔 Auto-mute: OFF": "🔕 Auto-mute enabled. After the first alert, everything is muted until the all-clear.",
     }
 
     answ = SETTINGS_REPLIES.get(message.text)
@@ -251,37 +263,111 @@ async def enable_clear(message):
     await settings(message)
 
 
+@dp.message(F.text.regexp(r"^🔕 Auto-mute: ON$"))
+async def disable_auto_mute(message):
+    await set_auto_mute(message.from_user.id, 0)
+    await settings(message)
+
+
+@dp.message(F.text.regexp(r"^🔔 Auto-mute: OFF$"))
+async def enable_auto_mute(message):
+    await set_auto_mute(message.from_user.id, 1)
+    await settings(message)
+
+
+# ALERT TYPE TOGGLES (inline keyboard)
+def alert_types_keyboard(disabled):
+    buttons = [
+        InlineKeyboardButton(
+            text=f"{'❌' if kind in disabled else '✅'} {label}",
+            callback_data=f"kind:{kind}",
+        )
+        for kind, label in ALERT_KINDS.items()
+    ]
+    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    rows.append(
+        [
+            InlineKeyboardButton(text="✅ Enable all", callback_data="kinds:1"),
+            InlineKeyboardButton(text="❌ Disable all", callback_data="kinds:0"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.message(F.text.regexp(r"^🎛 Alert types$"))
+async def alert_types_button(message):
+    disabled = await get_disabled_kinds(message.from_user.id)
+    await message.answer(
+        "🎛 Tap an alert type to turn it on (✅) or off (❌):",
+        reply_markup=alert_types_keyboard(disabled),
+    )
+
+
+@dp.callback_query(F.data.startswith("kind:"))
+async def toggle_kind(callback: CallbackQuery):
+    kind = callback.data.split(":", 1)[1]  # pyright: ignore[reportOptionalMemberAccess]
+    if kind not in ALERT_KINDS:
+        await callback.answer()
+        return
+
+    user_id = callback.from_user.id
+    disabled = await get_disabled_kinds(user_id)
+    enable = kind in disabled
+    await set_kind_enabled(user_id, kind, enable)
+    disabled.symmetric_difference_update({kind})
+
+    await callback.message.edit_reply_markup(  # pyright: ignore[reportOptionalMemberAccess]
+        reply_markup=alert_types_keyboard(disabled)
+    )
+    await callback.answer(f"{kind_label(kind)}: {'on' if enable else 'off'}")
+
+
+@dp.callback_query(F.data.startswith("kinds:"))
+async def toggle_all_kinds(callback: CallbackQuery):
+    enable = callback.data == "kinds:1"
+    user_id = callback.from_user.id
+    old_disabled = await get_disabled_kinds(user_id)
+    await set_all_kinds_enabled(user_id, ALERT_KINDS, enable)
+    disabled = set() if enable else set(ALERT_KINDS)
+
+    if disabled != old_disabled:
+        await callback.message.edit_reply_markup(  # pyright: ignore[reportOptionalMemberAccess]
+            reply_markup=alert_types_keyboard(disabled)
+        )
+    await callback.answer("All alert types on" if enable else "All alert types off")
+
+
 @dp.message(F.text.regexp(r"^🔙 Back$"))
 async def back_to_main(message):
     await message.answer("Main menu:", reply_markup=replyKeyboard)
 
 
 async def alert_loop():
-    global alert_status, current_alert_level, current_threat_types, current_alert_type
+    global active_kinds, current_alert_level
     while True:
         try:
-            is_alert, threat_types, alert_type = await get_alert()
-            has_missile_threat = any(t in MISSILE_THREATS for t in threat_types)
-            is_missile_danger = is_alert == "red" and has_missile_threat
+            result = await get_alerts()
+            if result is not None:
+                kinds, level = result
+                started = kinds - active_kinds
+                ended = active_kinds - kinds
 
-            logger.info(
-                f"[ALERT] Level: {is_alert} | Type: {alert_type} | Threats: {threat_types} | Danger: {is_missile_danger}"
-            )
+                logger.info(
+                    f"[ALERT] Level: {level} | Active: {sorted(kinds)} | "
+                    f"Started: {sorted(started)} | Ended: {sorted(ended)}"
+                )
 
-            # Update current state for status display
-            current_alert_level = is_alert if is_alert else None
-            current_threat_types = threat_types
-            current_alert_type = alert_type
+                active_kinds = kinds
+                current_alert_level = level
 
-            # New missile danger alert detected
-            if is_missile_danger and not alert_status:
-                alert_status = True
-                await send_danger_message()
+                if started:
+                    await send_started(started)
 
-            # Missile danger ended
-            elif not is_missile_danger and alert_status:
-                alert_status = False
-                await send_clear_message()
+                if ended:
+                    all_clear = not kinds
+                    await send_ended(ended, all_clear)
+                    if all_clear:
+                        await set_all_mutes(0)
 
         except Exception as e:  # noqa: BLE001
             logger.error(f"[ALERT LOOP ERROR]: {e}")
@@ -296,7 +382,7 @@ async def on_startup():
     # Запускаємо цикл перевірки тривог (API)
     asyncio.create_task(alert_loop())
 
-    logger.info("[STATUS] Bot started.")
+    logger.info("[STATUS] AirAlert started.")
 
 
 async def main():

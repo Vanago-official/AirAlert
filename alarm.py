@@ -16,38 +16,75 @@ config.read("config.cfg")
 token = getenv("ALARM")
 CITY = config["Settings"]["CITY"]
 
+# Every alert kind the bot knows about: alert types first, then threat types.
+# The order here is the order used in messages and in the settings keyboard.
+ALERT_KINDS = {
+    # alert_type
+    "air_raid": "🚨 Air raid",
+    "artillery_shelling": "💥 Artillery shelling",
+    "urban_fights": "⚔️ Urban fights",
+    "chemical": "☣️ Chemical danger",
+    "nuclear": "☢️ Nuclear danger",
+    # threats[].threat_type
+    "ballistic_missiles": "🚀 Ballistic missiles",
+    "cruise_missiles": "🚀 Cruise missiles",
+    "unspecified_missiles": "🚀 Missiles (unspecified)",
+    "mig31k_departure": "✈️ MiG-31K departure (Kinzhal)",
+    "strategic_aircraft_activity": "✈️ Strategic aviation",
+    "tactic_aircraft_activity": "✈️ Tactical aviation",
+    "drones": "🛸 Drones (UAV)",
+    "guided_aerial_bombs": "💣 Guided aerial bombs",
+    "air_defense": "🛡 Air defense active",
+    "unknown": "❓ Unknown threat",
+}
+
+_KIND_ORDER = {kind: i for i, kind in enumerate(ALERT_KINDS)}
+
+
+def kind_label(kind):
+    return ALERT_KINDS.get(kind, f"❓ {kind}")
+
+
+def sort_kinds(kinds):
+    """Sort kinds in ALERT_KINDS order; unknown kinds go last, alphabetically."""
+    return sorted(kinds, key=lambda k: (_KIND_ORDER.get(k, len(_KIND_ORDER)), k))
+
+
 # Persistent client instance for caching and rate limit handling
 _client = AsyncClient(token=token)
 
+_LEVEL_RANK = {None: 0, "yellow": 1, "red": 2}
 
-async def get_alert():
+
+async def get_alerts():
+    """Return (active_kinds, alert_level) for CITY, or None if the API failed.
+
+    active_kinds is a set of alert_type and threat_type strings.
+    alert_level is "red", "yellow" or None (the highest among the city's alerts).
+    """
     try:
-        alerts = await _client.get_active_alerts()
-        city_alerts = alerts.get_alerts_by_location_title(CITY)
-
-        if not city_alerts:
-            return False, [], None
+        await _client.get_active_alerts()
 
         # alert_level and threats are not parsed by the library,
-        # so we fetch them from the raw cached response
+        # so we read them from the raw cached response
         raw_alerts = _client.cache.get("alerts/active.json", {}).get("Data", {})
         raw_list = raw_alerts.get("alerts", [])
-        raw_city = next(
-            (a for a in raw_list if a.get("location_title") == CITY), None
-        )
+        city_alerts = [a for a in raw_list if a.get("location_title") == CITY]
 
-        if raw_city is None:
-            return False, [], None
+        kinds = set()
+        level = None
+        for alert in city_alerts:
+            if alert.get("alert_type"):
+                kinds.add(alert["alert_type"])
+            for threat in alert.get("threats") or []:
+                if threat.get("threat_type"):
+                    kinds.add(threat["threat_type"])
+            alert_level = alert.get("alert_level")
+            if _LEVEL_RANK.get(alert_level, 0) > _LEVEL_RANK.get(level, 0):
+                level = alert_level
 
-        alert_level = raw_city.get("alert_level")
-        alert_type = raw_city.get("alert_type")
-        threats = raw_city.get("threats") or []
-        threat_types = [
-            t.get("threat_type") for t in threats if t.get("threat_type")
-        ]
-
-        return alert_level, threat_types, alert_type
+        return kinds, level
 
     except Exception as e:  # noqa: BLE001
         logger.error(f"[API ERROR] Failed to check alert: {e}")
-        return False, [], None
+        return None
