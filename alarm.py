@@ -74,6 +74,18 @@ LEVEL_NAMES = {
 }
 
 
+# Toggleable levels, stored next to alert kinds as "level:<level>"
+LEVEL_TOGGLES = {
+    "level:red": "🔴 Red level",
+    "level:yellow": "🟡 Yellow level",
+    "level:alert": "🚨 No level",
+}
+
+
+def level_key(level):
+    return f"level:{level}"
+
+
 def threat_summary(kinds):
     """'missile, drone threat' style summary of the given kinds."""
     words = [word for word, group in THREAT_GROUPS if kinds & group]

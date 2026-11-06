@@ -18,7 +18,16 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from alarm import ALERT_KINDS, CITY, get_alerts, kind_label, level_line, sort_kinds
+from alarm import (
+    ALERT_KINDS,
+    CITY,
+    LEVEL_TOGGLES,
+    get_alerts,
+    kind_label,
+    level_key,
+    level_line,
+    sort_kinds,
+)
 from database import (
     add_user,
     apply_auto_mute,
@@ -47,8 +56,12 @@ BOT_TOKEN = getenv("BOT_TOKEN")
 active_kinds = set()  # alert_type and threat_type values active right now
 current_level = None  # None, "yellow", "red", "alert" (active without alert_level)
 episode_kinds = set()  # every kind seen since the alert started, for the all-clear
+episode_levels = set()  # every level seen since the alert started, for the all-clear
 
 ALL_CLEAR_TEXT = "🟢 All clear"
+
+# Everything a user can switch on/off: levels first, then alert kinds
+TOGGLES = {**LEVEL_TOGGLES, **ALERT_KINDS}
 
 bot = Bot(BOT_TOKEN)  # pyright: ignore[reportArgumentType]
 dp = Dispatcher()
@@ -72,6 +85,8 @@ async def send_level(level, kinds):
     """One line about the new level, built from the kinds each user has enabled."""
     sent = []
     for user_id, disabled in await get_recipients():
+        if level_key(level) in disabled:
+            continue
         user_kinds = kinds - disabled
         if user_kinds and await send_to(user_id, level_line(level, user_kinds)):
             sent.append(user_id)
@@ -79,10 +94,12 @@ async def send_level(level, kinds):
     await apply_auto_mute(sent)
 
 
-async def send_all_clear(kinds):
+async def send_all_clear(kinds, levels):
+    """All-clear for users who had at least one of the episode's kinds and levels enabled."""
+    level_keys = {level_key(level) for level in levels}
     # Muted users get the all-clear too, then their mute is lifted
     for user_id, disabled in await get_recipients(include_muted=True, require_clear=True):
-        if kinds - disabled:
+        if kinds - disabled and level_keys - disabled:
             await send_to(user_id, ALL_CLEAR_TEXT)
 
 
@@ -140,6 +157,9 @@ async def status_button(message):
 
     disabled = await get_disabled_kinds(message.from_user.id)
     enabled_count = len(set(ALERT_KINDS) - disabled)
+    enabled_levels = ", ".join(
+        label for key, label in LEVEL_TOGGLES.items() if key not in disabled
+    ) or "None"
 
     if active_kinds:
         alert_section = (
@@ -156,6 +176,7 @@ async def status_button(message):
         f"🔕 <b>Muted:</b> {'Yes' if info[1] else 'No'}\n"
         f"📩 <b>Send Clear:</b> {'Yes' if info[2] == 1 else 'No'}\n"
         f"🔕 <b>Auto-mute:</b> {'On' if info[3] == 1 else 'Off'}\n"
+        f"🎚 <b>Levels on:</b> {enabled_levels}\n"
         f"🎛 <b>Alert types on:</b> {enabled_count}/{len(ALERT_KINDS)}",
         parse_mode=ParseMode.HTML,
         reply_markup=replyKeyboard,
@@ -176,7 +197,7 @@ async def info_button(message):
         "📊 <b>Status</b> — current alerts and your settings.\n"
         "⚙️ <b>Settings</b> — activate/deactivate the bot, toggle end-of-alert "
         "messages, auto-mute (silence everything after the first alert until "
-        "the all-clear), choose alert types.\n"
+        "the all-clear), choose alert levels and types.\n"
         "ℹ️ <b>Info</b> — this message."
     )
     await message.answer(
@@ -259,16 +280,19 @@ async def enable_auto_mute(message):
     await settings(message)
 
 
-# ALERT TYPE TOGGLES (inline keyboard)
+# LEVEL AND ALERT TYPE TOGGLES (inline keyboard)
+def toggle_button(key, disabled):
+    return InlineKeyboardButton(
+        text=f"{'❌' if key in disabled else '✅'} {TOGGLES[key]}",
+        callback_data=f"kind:{key}",
+    )
+
+
 def alert_types_keyboard(disabled):
-    buttons = [
-        InlineKeyboardButton(
-            text=f"{'❌' if kind in disabled else '✅'} {label}",
-            callback_data=f"kind:{kind}",
-        )
-        for kind, label in ALERT_KINDS.items()
-    ]
-    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    # Levels on the first row, alert types two per row below
+    rows = [[toggle_button(key, disabled) for key in LEVEL_TOGGLES]]
+    buttons = [toggle_button(kind, disabled) for kind in ALERT_KINDS]
+    rows += [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
     rows.append(
         [
             InlineKeyboardButton(text="✅ Enable all", callback_data="kinds:1"),
@@ -282,7 +306,7 @@ def alert_types_keyboard(disabled):
 async def alert_types_button(message):
     disabled = await get_disabled_kinds(message.from_user.id)
     await message.answer(
-        "🎛 Tap an alert type to turn it on (✅) or off (❌):",
+        "🎛 Tap an alert level (first row) or alert type to turn it on (✅) or off (❌):",
         reply_markup=alert_types_keyboard(disabled),
     )
 
@@ -290,7 +314,7 @@ async def alert_types_button(message):
 @dp.callback_query(F.data.startswith("kind:"))
 async def toggle_kind(callback: CallbackQuery):
     kind = callback.data.split(":", 1)[1]  # pyright: ignore[reportOptionalMemberAccess]
-    if kind not in ALERT_KINDS:
+    if kind not in TOGGLES:
         await callback.answer()
         return
 
@@ -303,7 +327,7 @@ async def toggle_kind(callback: CallbackQuery):
     await callback.message.edit_reply_markup(  # pyright: ignore[reportOptionalMemberAccess]
         reply_markup=alert_types_keyboard(disabled)
     )
-    await callback.answer(f"{kind_label(kind)}: {'on' if enable else 'off'}")
+    await callback.answer(f"{TOGGLES[kind]}: {'on' if enable else 'off'}")
 
 
 @dp.callback_query(F.data.startswith("kinds:"))
@@ -311,14 +335,14 @@ async def toggle_all_kinds(callback: CallbackQuery):
     enable = callback.data == "kinds:1"
     user_id = callback.from_user.id
     old_disabled = await get_disabled_kinds(user_id)
-    await set_all_kinds_enabled(user_id, ALERT_KINDS, enable)
-    disabled = set() if enable else set(ALERT_KINDS)
+    await set_all_kinds_enabled(user_id, TOGGLES, enable)
+    disabled = set() if enable else set(TOGGLES)
 
     if disabled != old_disabled:
         await callback.message.edit_reply_markup(  # pyright: ignore[reportOptionalMemberAccess]
             reply_markup=alert_types_keyboard(disabled)
         )
-    await callback.answer("All alert types on" if enable else "All alert types off")
+    await callback.answer("Everything on" if enable else "Everything off")
 
 
 @dp.message(F.text.regexp(r"^🔙 Back$"))
@@ -327,7 +351,7 @@ async def back_to_main(message):
 
 
 async def alert_loop():
-    global active_kinds, current_level, episode_kinds
+    global active_kinds, current_level, episode_kinds, episode_levels
     while True:
         try:
             result = await get_alerts()
@@ -344,14 +368,17 @@ async def alert_loop():
                 active_kinds = kinds
                 current_level = level
                 episode_kinds |= kinds
+                if level:
+                    episode_levels.add(level)
 
                 # Notify only when the level changes; threat changes alone are silent
                 if level != previous_level:
                     if level:
                         await send_level(level, kinds)
                     else:
-                        await send_all_clear(episode_kinds)
+                        await send_all_clear(episode_kinds, episode_levels)
                         episode_kinds = set()
+                        episode_levels = set()
                         await set_all_mutes(0)
 
         except Exception as e:  # noqa: BLE001

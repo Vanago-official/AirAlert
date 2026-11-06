@@ -12,7 +12,7 @@
 
 - 🚨 **Any Alert:** Polls the [alerts.in.ua](https://alerts.in.ua/) API every 10 seconds and detects every alert type (air raid, artillery, urban fights, chemical, nuclear) and every threat (missiles, drones, aviation, guided bombs, etc.).
 - 📨 **One-Line Messages:** The bot sends a message only when the alert level changes: `<level> — <threat>`.
-- 🎛 **Per-Type Toggles:** Every alert type can be turned on or off in Settings → 🎛 Alert types.
+- 🎛 **Per-Level and Per-Type Toggles:** Every alert level (red, yellow, no level) and every alert type can be turned on or off in Settings → 🎛 Alert types.
 - 🔕 **Mute:** Mute notifications until all alerts end. You still get the final all-clear.
 - 🔕 **Auto-mute mode:** Optional setting. After the first alert message you are muted automatically until the all-clear.
 - ⚙️ **Clear Messages:** Opt in or out of end-of-alert messages.
@@ -34,8 +34,8 @@ config.cfg     — City configuration
 **How the alert loop works:**
 
 1. The bot queries the alerts API every 10 seconds and collects all `alert_type` and `threat_type` values for the city.
-2. **Level changed** (none, yellow, red): active, unmuted users get one line built from the types they have enabled. Threat changes at the same level send nothing. Users with auto-mute on are muted right after.
-3. **All clear:** When no alerts remain, users with clear messages on get `🟢 All clear` (muted users too), and all mutes are lifted.
+2. **Level changed** (none, yellow, red): active, unmuted users get one line built from the types they have enabled. Threat changes at the same level send nothing. Users who turned that level off get nothing. Users with auto-mute on are muted right after.
+3. **All clear:** When no alerts remain, users with clear messages on get `🟢 All clear` (muted users too), if they had at least one of that alert's levels and types on. Then all mutes are lifted.
 4. If an alert has no `alert_level` in the API data, the level is shown as `🚨 Alert`.
 5. If the API request fails, the bot skips that check. It does not send a false all-clear.
 
@@ -50,6 +50,8 @@ Format: `<level> — <threats> threat`, or `🟢 All clear`.
 | `🔴 Red level` | API `alert_level` is `red` |
 | `🟡 Yellow level` | API `alert_level` is `yellow` |
 | `🚨 Alert` | Alert active, no `alert_level` |
+
+Each level can be turned off: the first row in Settings → 🎛 Alert types (`🔴 Red level`, `🟡 Yellow level`, `🚨 No level`).
 
 Threat words, most dangerous first. Several active groups are joined: `missile, drone threat`.
 
@@ -150,7 +152,7 @@ python main.py
 | 🛑 Deactivate | Unsubscribe from all alerts |
 | 🟢 Send clear / 🔴 Don't send clear | Toggle end-of-alert messages |
 | 🔕 Auto-mute: ON / 🔔 Auto-mute: OFF | Toggle auto-mute until all-clear |
-| 🎛 Alert types | Turn each alert type on (✅) or off (❌), or all at once |
+| 🎛 Alert types | Turn each alert level and type on (✅) or off (❌), or all at once |
 | 🔙 Back | Return to the main menu |
 
 ---
